@@ -7,7 +7,7 @@ const { scrapeSport: scrapeGoldenBet } = require('./goldenbet');
 const { scrapeSport: scrapeOddsAPI, BM_NAMES } = require('./theoddsapi');
 
 const app = express();
-const cache = new NodeCache({ stdTTL: 60 });
+const cache = new NodeCache({ stdTTL: 150 }); // 2.5 min — covers background scrape interval
 
 const ALLOWED_ORIGINS = [
   'https://oddschecker2.netlify.app',
@@ -77,6 +77,38 @@ function decimalToOddsValue(decimal) {
   };
 }
 
+// Convert a raw FreshBet/GoldenBet match into OddsAPI-compatible format with selections
+function fbToApiFormat(m, source) {
+  const homeOdds = m.odds && m.odds.home;
+  const drawOdds = m.odds && m.odds.draw;
+  const awayOdds = m.odds && m.odds.away;
+  if (!homeOdds || !awayOdds) return null;
+  const hv = decimalToOddsValue(homeOdds);
+  const dv = drawOdds ? decimalToOddsValue(drawOdds) : null;
+  const av = decimalToOddsValue(awayOdds);
+  if (!hv || !av) return null;
+  hv.isBest = true; av.isBest = true; if (dv) dv.isBest = true;
+  const selections = [
+    { name: '1', odds: { [source]: hv } },
+    ...(dv ? [{ name: 'X', odds: { [source]: dv } }] : []),
+    { name: '2', odds: { [source]: av } },
+  ];
+  return { ...m, source, selections };
+}
+
+function buildStandaloneRows(fb, gb, apiMatches) {
+  const apiKeys = new Set(apiMatches.map(m => normName(m.homeTeam) + normName(m.awayTeam)));
+  const fbRows = fb
+    .filter(m => !apiKeys.has(normName(m.homeTeam) + normName(m.awayTeam)))
+    .map(m => fbToApiFormat(m, 'freshbet'))
+    .filter(Boolean);
+  const gbRows = gb
+    .filter(m => !apiKeys.has(normName(m.homeTeam) + normName(m.awayTeam)))
+    .map(m => fbToApiFormat(m, 'goldenbet'))
+    .filter(Boolean);
+  return { fbRows, gbRows };
+}
+
 function injectFbOdds(apiMatches, fbMatches, gbMatches) {
   return apiMatches.map(match => {
     const fb = findFbMatch(fbMatches, match.homeTeam, match.awayTeam);
@@ -130,35 +162,9 @@ app.get('/odds/:sport', async (req, res) => {
         scrapeGoldenBet(sport).catch(() => []),
       ]);
 
-      // Try to inject FB/GB odds into OddsAPI matches where team names match
+      // Inject FB/GB odds into OddsAPI matches where teams match, append rest as standalone rows
       const enriched = injectFbOdds(apiMatches, fb, gb);
-
-      // For FB/GB matches with NO OddsAPI equivalent, append them as standalone rows
-      const apiKeys = new Set(apiMatches.map(m => normName(m.homeTeam) + normName(m.awayTeam)));
-      const fbOnly = fb.filter(m => !apiKeys.has(normName(m.homeTeam) + normName(m.awayTeam)));
-      const gbOnly = gb.filter(m => !apiKeys.has(normName(m.homeTeam) + normName(m.awayTeam)));
-
-      // Convert FB/GB standalone matches to OddsAPI-compatible format
-      function fbToApiFormat(m, source) {
-        const homeOdds = m.odds?.home;
-        const drawOdds = m.odds?.draw;
-        const awayOdds = m.odds?.away;
-        if (!homeOdds || !awayOdds) return null;
-        const hv = decimalToOddsValue(homeOdds);
-        const dv = drawOdds ? decimalToOddsValue(drawOdds) : null;
-        const av = decimalToOddsValue(awayOdds);
-        if (!hv || !av) return null;
-        hv.isBest = true; av.isBest = true; if (dv) dv.isBest = true;
-        const selections = [
-          { name: '1', odds: { [source]: hv } },
-          ...(dv ? [{ name: 'X', odds: { [source]: dv } }] : []),
-          { name: '2', odds: { [source]: av } },
-        ];
-        return { ...m, source, selections };
-      }
-
-      const fbRows = fbOnly.map(m => fbToApiFormat(m, 'freshbet')).filter(Boolean);
-      const gbRows = gbOnly.map(m => fbToApiFormat(m, 'goldenbet')).filter(Boolean);
+      const { fbRows, gbRows } = buildStandaloneRows(fb, gb, apiMatches);
 
       matches = [...enriched, ...fbRows, ...gbRows];
       console.log(`[API] ${sport}: ${enriched.length} enriched + ${fbRows.length} fb-only + ${gbRows.length} gb-only`);
@@ -227,17 +233,7 @@ async function backgroundScrape() {
           scrapeGoldenBet(sport).catch(() => []),
         ]);
         const enriched = injectFbOdds(apiMatches, fb, gb);
-        const apiKeys = new Set(apiMatches.map(m => normName(m.homeTeam) + normName(m.awayTeam)));
-        function fbToApiFormat(m, source) {
-          const hv = decimalToOddsValue(m.odds?.home);
-          const dv = m.odds?.draw ? decimalToOddsValue(m.odds.draw) : null;
-          const av = decimalToOddsValue(m.odds?.away);
-          if (!hv || !av) return null;
-          hv.isBest = true; av.isBest = true; if (dv) dv.isBest = true;
-          return { ...m, source, selections: [{ name: '1', odds: { [source]: hv } }, ...(dv ? [{ name: 'X', odds: { [source]: dv } }] : []), { name: '2', odds: { [source]: av } }] };
-        }
-        const fbRows = fb.filter(m => !apiKeys.has(normName(m.homeTeam) + normName(m.awayTeam))).map(m => fbToApiFormat(m, 'freshbet')).filter(Boolean);
-        const gbRows = gb.filter(m => !apiKeys.has(normName(m.homeTeam) + normName(m.awayTeam))).map(m => fbToApiFormat(m, 'goldenbet')).filter(Boolean);
+        const { fbRows, gbRows } = buildStandaloneRows(fb, gb, apiMatches);
         const merged = [...enriched, ...fbRows, ...gbRows];
         if (merged.length > 0) cache.set(`odds-${sport}`, merged);
         console.log(`[Background] ${sport}: ${merged.length} matches (api+fb+gb)`);
