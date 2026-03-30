@@ -36,20 +36,27 @@ let teamCache = null;         // Map: teamId (number) → teamName (string)
 let teamCacheTime = 0;
 const TEAM_TTL = 30 * 60 * 1000; // 30 minutes
 
-async function apiFetch(path) {
+async function apiFetch(path, retries = 2) {
   const url = `${BASE_URL}${path}`;
-  const res = await fetch(url, {
-    headers: {
-      'Accept': 'application/json, text/plain, */*',
-      'Origin': 'https://freshbet.com',
-      'Referer': 'https://freshbet.com/',
-    },
-    signal: AbortSignal.timeout(15000),
-  });
-  if (!res.ok) throw new Error(`API ${res.status} for ${url}`);
-  const text = await res.text();
-  try { return JSON.parse(text); }
-  catch { return JSON.parse(JSON.parse(text)); }
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'Origin': 'https://freshbet.com',
+          'Referer': 'https://freshbet.com/',
+        },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!res.ok) throw new Error(`API ${res.status} for ${url}`);
+      const text = await res.text();
+      try { return JSON.parse(text); }
+      catch { return JSON.parse(JSON.parse(text)); }
+    } catch (err) {
+      if (attempt === retries) throw err;
+      console.warn(`[FreshBet] Retry ${attempt + 1}/${retries} for ${path}: ${err.message}`);
+    }
+  }
 }
 
 // ─── Step 1: Get game IDs grouped by sport ───────────────────────
