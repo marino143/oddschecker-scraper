@@ -50,7 +50,68 @@ app.get('/bookmakers', (req, res) => {
   res.json({ bookmakers: BM_NAMES });
 });
 
-// ─── GET /odds/:sport — primary endpoint (OddsAPI if available, else FreshBet) ──
+// ─── Helpers for merging FreshBet/GoldenBet odds into OddsAPI matches ──
+function normName(s) { return (s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+
+function fuzzyMatch(a, b) {
+  const na = normName(a), nb = normName(b);
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
+function findFbMatch(fbList, homeTeam, awayTeam) {
+  return fbList.find(m =>
+    fuzzyMatch(m.homeTeam, homeTeam) && fuzzyMatch(m.awayTeam, awayTeam)
+  ) || null;
+}
+
+function decimalToOddsValue(decimal) {
+  if (!decimal || decimal <= 1) return null;
+  const num = Math.round((decimal - 1) * 100);
+  const denom = 100;
+  const g = (function gcd(a, b) { return b === 0 ? a : gcd(b, a % b); })(Math.abs(num), denom);
+  return {
+    decimal,
+    fractional: `${num / g}/${denom / g}`,
+    american:   decimal >= 2 ? `+${Math.round((decimal - 1) * 100)}` : `-${Math.round(100 / (decimal - 1))}`,
+    isBest: false,
+  };
+}
+
+function injectFbOdds(apiMatches, fbMatches, gbMatches) {
+  return apiMatches.map(match => {
+    const fb = findFbMatch(fbMatches, match.homeTeam, match.awayTeam);
+    const gb = findFbMatch(gbMatches, match.homeTeam, match.awayTeam);
+    if (!fb && !gb) return match;
+
+    const selections = match.selections.map(sel => {
+      const newOdds = { ...sel.odds };
+      const key = sel.name; // '1', 'X', '2'
+
+      if (key === '1') {
+        const fv = fb ? decimalToOddsValue(fb.odds?.home) : null;
+        const gv = gb ? decimalToOddsValue(gb.odds?.home) : null;
+        if (fv) newOdds['freshbet'] = fv;
+        if (gv) newOdds['goldenbet'] = gv;
+      } else if (key === 'X') {
+        const fv = fb ? decimalToOddsValue(fb.odds?.draw) : null;
+        const gv = gb ? decimalToOddsValue(gb.odds?.draw) : null;
+        if (fv) newOdds['freshbet'] = fv;
+        if (gv) newOdds['goldenbet'] = gv;
+      } else if (key === '2') {
+        const fv = fb ? decimalToOddsValue(fb.odds?.away) : null;
+        const gv = gb ? decimalToOddsValue(gb.odds?.away) : null;
+        if (fv) newOdds['freshbet'] = fv;
+        if (gv) newOdds['goldenbet'] = gv;
+      }
+
+      return { ...sel, odds: newOdds };
+    });
+
+    return { ...match, selections };
+  });
+}
+
+// ─── GET /odds/:sport — primary endpoint (OddsAPI + FreshBet + GoldenBet) ──
 app.get('/odds/:sport', async (req, res) => {
   const { sport } = req.params;
   const cacheKey = `odds-${sport}`;
@@ -62,12 +123,20 @@ app.get('/odds/:sport', async (req, res) => {
     let matches = [];
 
     if (HAS_ODDS_API) {
-      // Primary: The Odds API (real bookmakers)
-      matches = await scrapeOddsAPI(sport);
+      // Fetch all three in parallel
+      const [apiMatches, fb, gb] = await Promise.all([
+        scrapeOddsAPI(sport),
+        scrapeFreshBet(sport).catch(() => []),
+        scrapeGoldenBet(sport).catch(() => []),
+      ]);
+
+      // Inject FreshBet + GoldenBet odds into OddsAPI matches where team names match
+      matches = injectFbOdds(apiMatches, fb, gb);
+      console.log(`[API] ${sport}: ${matches.length} OddsAPI matches, fb=${fb.length}, gb=${gb.length}`);
     }
 
     if (matches.length === 0) {
-      // Fallback: FreshBet + GoldenBet
+      // Fallback: FreshBet + GoldenBet only
       const [fb, gb] = await Promise.all([scrapeFreshBet(sport), scrapeGoldenBet(sport)]);
       matches = [...fb, ...gb];
     }
@@ -83,7 +152,6 @@ app.get('/odds/:sport', async (req, res) => {
     });
   } catch (err) {
     console.error(`[API] /odds/${sport} error:`, err.message);
-    // Fallback on error
     try {
       const fb = await scrapeFreshBet(sport);
       res.json({ source: 'fallback', data: fb, count: fb.length });
@@ -120,20 +188,28 @@ const SPORTS   = ['football', 'basketball', 'tennis'];
 const INTERVAL = parseInt(process.env.SCRAPE_INTERVAL_MS || '120000'); // 2 min default
 
 async function backgroundScrape() {
-  if (!HAS_ODDS_API) {
-    // No Odds API — scrape FreshBet + GoldenBet
-    for (const sport of SPORTS) {
-      try {
+  for (const sport of SPORTS) {
+    try {
+      if (HAS_ODDS_API) {
+        // Refresh OddsAPI + inject FreshBet/GoldenBet
+        const [apiMatches, fb, gb] = await Promise.all([
+          scrapeOddsAPI(sport),
+          scrapeFreshBet(sport).catch(() => []),
+          scrapeGoldenBet(sport).catch(() => []),
+        ]);
+        const merged = injectFbOdds(apiMatches, fb, gb);
+        if (merged.length > 0) cache.set(`odds-${sport}`, merged);
+        console.log(`[Background] ${sport}: ${merged.length} matches (api+fb+gb)`);
+      } else {
         const [fb, gb] = await Promise.all([scrapeFreshBet(sport), scrapeGoldenBet(sport)]);
         const merged = [...fb, ...gb];
         if (merged.length > 0) cache.set(`odds-${sport}`, merged);
         console.log(`[Background] ${sport}: ${merged.length} matches (fb+gb)`);
-      } catch (err) {
-        console.error(`[Background] ${sport} error:`, err.message);
       }
+    } catch (err) {
+      console.error(`[Background] ${sport} error:`, err.message);
     }
   }
-  // OddsAPI has its own 2h internal cache — no background needed
 }
 
 setInterval(backgroundScrape, INTERVAL);
