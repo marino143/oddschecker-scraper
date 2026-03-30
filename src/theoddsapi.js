@@ -36,7 +36,7 @@ const SPORTS_BY_CATEGORY = {
 
 // Cache: { sportKey → { data, fetchedAt } }
 const cache = {};
-const CACHE_TTL = 30 * 60 * 1000; // 30 minutes — 20K plan (~10,000 credits/month at this rate)
+const CACHE_TTL = 10 * 60 * 1000; // 10 minutes — 100K plan (~47,500 credits/month at this rate)
 
 // Bookmaker display names
 const BM_NAMES = {
