@@ -1,4 +1,9 @@
-const { chromium } = require('playwright');
+// Playwright lazy-loaded — only needed if ZENROWS_BROWSER_WSS is set
+let chromium = null;
+function getChromium() {
+  if (!chromium) chromium = require('playwright').chromium;
+  return chromium;
+}
 const cheerio = require('cheerio');
 
 // GoldenBet URL patterns to try (in order)
@@ -21,7 +26,7 @@ async function scrapeViaBrowser(sportPath) {
   const url = `https://goldenbet.com${sportPath}`;
   console.log(`[ScrapingBrowser] Connecting to ZenRows browser...`);
 
-  const browser = await chromium.connectOverCDP(wss);
+  const browser = await getChromium().connectOverCDP(wss);
   const context = await browser.newContext();
   const page = await context.newPage();
 
@@ -281,7 +286,7 @@ async function discoverApiEndpoints() {
   const wss = process.env.ZENROWS_BROWSER_WSS;
   if (!wss) return { error: 'ZENROWS_BROWSER_WSS not configured' };
 
-  const browser = await chromium.connectOverCDP(wss);
+  const browser = await getChromium().connectOverCDP(wss);
   const context = await browser.newContext();
   const page = await context.newPage();
   const apiCalls = [];
