@@ -2,8 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const NodeCache = require('node-cache');
-const { scrapeSport: scrapeGoldenBet, discoverApiEndpoints } = require('./scraper');
-const { scrapeSport: scrapeFreshBet, scrapeAll: scrapeAllFreshBet } = require('./freshbet');
+const { scrapeSport: scrapeFreshBet } = require('./freshbet');
+const { scrapeSport: scrapeGoldenBet } = require('./goldenbet');
 
 const app = express();
 const cache = new NodeCache({ stdTTL: 60 });
@@ -27,80 +27,82 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    sources: {
-      freshbet: true,
-      goldenbet: !!process.env.ZENROWS_API_KEY,
-    },
+    sources: { freshbet: true, goldenbet: true },
     uptime: Math.round(process.uptime()),
     cached: {
-      football:   !!cache.get('freshbet-football'),
-      tennis:     !!cache.get('freshbet-tennis'),
-      basketball: !!cache.get('freshbet-basketball'),
+      'freshbet-football':   !!cache.get('freshbet-football'),
+      'freshbet-tennis':     !!cache.get('freshbet-tennis'),
+      'freshbet-basketball': !!cache.get('freshbet-basketball'),
+      'goldenbet-football':  !!cache.get('goldenbet-football'),
     },
     timestamp: new Date().toISOString(),
   });
 });
 
-// ─── GET /odds/:sport — FreshBet (primary source) ─────────────────
+// ─── Helper to serve odds from a bookmaker ────────────────────────
+function oddsHandler(bookmaker, scrapeFn) {
+  return async (req, res) => {
+    const sport = req.params.sport || 'football';
+    const cacheKey = `${bookmaker}-${sport}`;
+    try {
+      const cached = cache.get(cacheKey);
+      if (cached) return res.json({ source: 'cache', bookmaker, data: cached, count: cached.length });
+
+      const matches = await scrapeFn(sport);
+      if (matches.length > 0) cache.set(cacheKey, matches);
+
+      res.json({ source: 'live', bookmaker, data: matches, count: matches.length, scrapedAt: new Date().toISOString() });
+    } catch (err) {
+      console.error(`[API] /${bookmaker}/${sport} error:`, err.message);
+      res.status(500).json({ error: err.message, data: [] });
+    }
+  };
+}
+
+// ─── GET /odds/:sport — returns both FreshBet + GoldenBet merged ──
 app.get('/odds/:sport', async (req, res) => {
   const { sport } = req.params;
-  const cacheKey = `freshbet-${sport}`;
   try {
-    const cached = cache.get(cacheKey);
-    if (cached) return res.json({ source: 'cache', bookmaker: 'freshbet', data: cached, count: cached.length });
+    const fbCached = cache.get(`freshbet-${sport}`);
+    const gbCached = cache.get(`goldenbet-${sport}`);
 
-    const matches = await scrapeFreshBet(sport);
-    if (matches.length > 0) cache.set(cacheKey, matches);
+    // If both cached, merge and return
+    if (fbCached && gbCached) {
+      return res.json({
+        source: 'cache',
+        bookmakers: ['freshbet', 'goldenbet'],
+        data: [...fbCached, ...gbCached],
+        count: fbCached.length + gbCached.length,
+      });
+    }
 
-    res.json({ source: 'live', bookmaker: 'freshbet', data: matches, count: matches.length, scrapedAt: new Date().toISOString() });
+    // Fetch both in parallel
+    const [fbMatches, gbMatches] = await Promise.all([
+      fbCached ? Promise.resolve(fbCached) : scrapeFreshBet(sport),
+      gbCached ? Promise.resolve(gbCached) : scrapeGoldenBet(sport),
+    ]);
+
+    if (fbMatches.length > 0) cache.set(`freshbet-${sport}`, fbMatches);
+    if (gbMatches.length > 0) cache.set(`goldenbet-${sport}`, gbMatches);
+
+    res.json({
+      source: 'live',
+      bookmakers: ['freshbet', 'goldenbet'],
+      data: [...fbMatches, ...gbMatches],
+      count: fbMatches.length + gbMatches.length,
+      scrapedAt: new Date().toISOString(),
+    });
   } catch (err) {
     console.error(`[API] /odds/${sport} error:`, err.message);
     res.status(500).json({ error: err.message, data: [] });
   }
 });
 
-// ─── GET /odds/football shorthand ─────────────────────────────────
-app.get('/odds/football', async (req, res) => {
-  const cacheKey = 'freshbet-football';
-  try {
-    const cached = cache.get(cacheKey);
-    if (cached) return res.json({ source: 'cache', bookmaker: 'freshbet', data: cached, count: cached.length });
-
-    const matches = await scrapeFreshBet('football');
-    if (matches.length > 0) cache.set(cacheKey, matches);
-
-    res.json({ source: 'live', bookmaker: 'freshbet', data: matches, count: matches.length, scrapedAt: new Date().toISOString() });
-  } catch (err) {
-    res.status(500).json({ error: err.message, data: [] });
-  }
-});
-
 // ─── GET /freshbet/:sport — explicit FreshBet endpoint ────────────
-app.get('/freshbet/:sport', async (req, res) => {
-  const { sport } = req.params;
-  const cacheKey = `freshbet-${sport}`;
-  try {
-    const cached = cache.get(cacheKey);
-    if (cached) return res.json({ source: 'cache', bookmaker: 'freshbet', data: cached, count: cached.length });
+app.get('/freshbet/:sport', oddsHandler('freshbet', scrapeFreshBet));
 
-    const matches = await scrapeFreshBet(sport);
-    if (matches.length > 0) cache.set(cacheKey, matches);
-
-    res.json({ source: 'live', bookmaker: 'freshbet', data: matches, count: matches.length, scrapedAt: new Date().toISOString() });
-  } catch (err) {
-    res.status(500).json({ error: err.message, data: [] });
-  }
-});
-
-// ─── GET /discover — GoldenBet API discovery ──────────────────────
-app.get('/discover', async (req, res) => {
-  try {
-    const result = await discoverApiEndpoints();
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+// ─── GET /goldenbet/:sport — explicit GoldenBet endpoint ──────────
+app.get('/goldenbet/:sport', oddsHandler('goldenbet', scrapeGoldenBet));
 
 // ─── Background scrape every SCRAPE_INTERVAL_MS ───────────────────
 const SPORTS   = ['football', 'basketball', 'tennis'];
@@ -109,36 +111,45 @@ const INTERVAL = parseInt(process.env.SCRAPE_INTERVAL_MS || '60000');
 async function backgroundScrape() {
   console.log('[Background] Starting scrape cycle...');
   for (const sport of SPORTS) {
+    // FreshBet
     try {
       const matches = await scrapeFreshBet(sport);
       if (matches.length > 0) {
         cache.set(`freshbet-${sport}`, matches);
         console.log(`[Background] freshbet ${sport}: ${matches.length} matches cached`);
-      } else {
-        console.warn(`[Background] freshbet ${sport}: 0 matches`);
       }
     } catch (err) {
-      console.error(`[Background] ${sport} error:`, err.message);
+      console.error(`[Background] freshbet ${sport} error:`, err.message);
     }
-    await new Promise(r => setTimeout(r, 800));
+    await new Promise(r => setTimeout(r, 500));
+
+    // GoldenBet
+    try {
+      const matches = await scrapeGoldenBet(sport);
+      if (matches.length > 0) {
+        cache.set(`goldenbet-${sport}`, matches);
+        console.log(`[Background] goldenbet ${sport}: ${matches.length} matches cached`);
+      }
+    } catch (err) {
+      console.error(`[Background] goldenbet ${sport} error:`, err.message);
+    }
+    await new Promise(r => setTimeout(r, 500));
   }
 }
 
 setInterval(backgroundScrape, INTERVAL);
-setTimeout(backgroundScrape, 2000); // initial scrape 2s after start
+setTimeout(backgroundScrape, 2000);
 
 // ─── Start ────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`\n🚀 OddsChecker Scraper running on port ${PORT}`);
-  console.log(`   Primary source: FreshBet (analytics-sp.googleserv.tech)`);
+  console.log(`   Sources: FreshBet (ID 52) + GoldenBet (ID 73)`);
   console.log(`   Scrape interval: ${INTERVAL / 1000}s`);
   console.log(`\n   GET /health              — status`);
-  console.log(`   GET /odds/football       — football odds (FreshBet)`);
-  console.log(`   GET /odds/tennis         — tennis odds (FreshBet)`);
-  console.log(`   GET /odds/basketball     — basketball odds (FreshBet)`);
-  console.log(`   GET /freshbet/:sport     — explicit FreshBet endpoint`);
-  console.log(`   GET /discover            — discover GoldenBet API endpoints\n`);
+  console.log(`   GET /odds/:sport         — merged FreshBet + GoldenBet odds`);
+  console.log(`   GET /freshbet/:sport     — FreshBet only`);
+  console.log(`   GET /goldenbet/:sport    — GoldenBet only\n`);
 });
 
 process.on('SIGTERM', async () => { process.exit(0); });
