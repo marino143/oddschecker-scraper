@@ -40,6 +40,8 @@ app.get('/health', (req, res) => {
       'football':   !!cache.get('odds-football'),
       'basketball': !!cache.get('odds-basketball'),
       'tennis':     !!cache.get('odds-tennis'),
+      'ice-hockey': !!cache.get('odds-ice-hockey'),
+      'baseball':   !!cache.get('odds-baseball'),
     },
     timestamp: new Date().toISOString(),
   });
@@ -219,7 +221,7 @@ app.get('/goldenbet/:sport', async (req, res) => {
 });
 
 // ─── Background scrape — only FreshBet/GoldenBet (OddsAPI cached 2h internally) ─
-const SPORTS   = ['football', 'basketball', 'tennis'];
+const SPORTS   = ['football', 'basketball', 'tennis', 'ice-hockey', 'baseball'];
 const INTERVAL = parseInt(process.env.SCRAPE_INTERVAL_MS || '120000'); // 2 min default
 
 async function backgroundScrape() {
