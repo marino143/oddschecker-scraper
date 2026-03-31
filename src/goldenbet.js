@@ -81,9 +81,12 @@ async function getHeaderMeta() {
 
     const champMap = {};
     const gameMap = {};
+    const sportGameIds = {};
 
     const sports = parsed?.EN?.Sports || {};
-    for (const sport of Object.values(sports)) {
+    for (const [sportKey, sport] of Object.entries(sports)) {
+      const sportId = sport.ID ?? sport.id ?? parseInt(sportKey);
+      if (sportId) sportGameIds[sportId] = sportGameIds[sportId] || [];
       for (const region of Object.values(sport.Regions || {})) {
         const regionName = region.Name || region.KeyName || '';
         for (const champ of Object.values(region.Champs || {})) {
@@ -92,19 +95,20 @@ async function getHeaderMeta() {
           for (const game of Object.values(champ.GameSmallItems || {})) {
             if (game.ID > 0) {
               gameMap[game.ID] = { champId: champ.ID, t1: game.t1, t2: game.t2 };
+              if (sportId && sportGameIds[sportId]) sportGameIds[sportId].push(game.ID);
             }
           }
         }
       }
     }
 
-    headerCache = { champMap, gameMap };
+    headerCache = { champMap, gameMap, sportGameIds };
     headerCacheTime = now;
     console.log(`[GoldenBet] getheader: ${Object.keys(champMap).length} leagues, ${Object.keys(gameMap).length} games`);
     return headerCache;
   } catch (e) {
     console.warn('[GoldenBet] Could not load getheader:', e.message);
-    return { champMap: {}, gameMap: {} };
+    return { champMap: {}, gameMap: {}, sportGameIds: {} };
   }
 }
 
@@ -193,20 +197,28 @@ function isToday(date) {
 async function scrapeSport(sport = 'football') {
   console.log(`[GoldenBet] Fetching ${sport}...`);
   try {
-    const [topGames, meta, teamMap] = await Promise.all([
-      getTopGames(),
-      getHeaderMeta(),
-      getTeamMap(),
-    ]);
+    const sportId = SPORT_IDS[sport];
+    const [meta, teamMap] = await Promise.all([getHeaderMeta(), getTeamMap()]);
 
-    const gameIds = topGames[sport] || topGames['soccer'] || [];
-    if (gameIds.length === 0) {
+    let allGameIds = (meta.sportGameIds?.[sportId] || []).slice(0, 100);
+    if (allGameIds.length === 0) {
+      const topGames = await getTopGames();
+      allGameIds = topGames[sport] || topGames['soccer'] || [];
+    }
+    if (allGameIds.length === 0) {
       console.warn(`[GoldenBet] No game IDs for sport: ${sport}`);
       return [];
     }
-    console.log(`[GoldenBet] Found ${gameIds.length} ${sport} game IDs`);
+    console.log(`[GoldenBet] Found ${allGameIds.length} ${sport} game IDs`);
 
-    const rawGames = await getGameOdds(gameIds);
+    const batch1 = allGameIds.slice(0, 50);
+    const batch2 = allGameIds.slice(50);
+    const [games1, games2] = await Promise.all([
+      getGameOdds(batch1),
+      batch2.length > 0 ? getGameOdds(batch2) : Promise.resolve([]),
+    ]);
+
+    const rawGames = [...games1, ...games2];
     console.log(`[GoldenBet] Got odds for ${rawGames.length} games`);
 
     const matches = rawGames
