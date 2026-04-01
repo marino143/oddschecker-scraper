@@ -186,7 +186,7 @@ function formatGame(game, meta, teamMap, sport) {
   return {
     id:           `fb-${game.id}`,
     source:       'freshbet',
-    affiliateUrl: 'https://freshbet.com/sportsbook',
+    affiliateUrl: `https://freshbet.com/sportsbook/event/${game.id}`,
     sport,
     league,
     region,

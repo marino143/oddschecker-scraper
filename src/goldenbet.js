@@ -165,7 +165,7 @@ function formatGame(game, meta, teamMap, sport) {
   return {
     id:           `gb-${game.id}`,
     source:       'goldenbet',
-    affiliateUrl: 'https://goldenbet.com/eng/sportsbook/prematch',
+    affiliateUrl: `https://goldenbet.com/eng/sportsbook/prematch/${game.id}`,
     sport,
     league,
     region,
